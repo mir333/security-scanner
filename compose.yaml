@@ -1,0 +1,206 @@
+# DevSecOps stack: OWASP DefectDojo (dashboard) + Semgrep (SAST) + OWASP ZAP (DAST)
+#
+#   docker compose up -d                                    # DefectDojo on http://localhost:${DD_PORT}
+#   docker compose --profile scan run --rm import-semgrep   # SAST  -> DefectDojo
+#   docker compose --profile scan run --rm import-zap       # DAST baseline (passive) -> DefectDojo
+#   docker compose --profile scan run --rm import-zap-full  # DAST full (active attack!) -> DefectDojo
+#
+# All configuration lives in .env (copy .env.example). SCAN_PATH and ZAP_TARGET
+# are mandatory: compose refuses to parse without them.
+---
+x-dd-env: &dd-env
+  DD_DATABASE_URL: postgresql://${DD_DATABASE_USER:-defectdojo}:${DD_DATABASE_PASSWORD:-defectdojo}@postgres:5432/${DD_DATABASE_NAME:-defectdojo}
+  DD_CELERY_BROKER_URL: redis://valkey:6379/0
+  DD_CACHE_URL: redis://valkey:6379/1
+  DD_SECRET_KEY: ${DD_SECRET_KEY:?set DD_SECRET_KEY in .env}
+  DD_CREDENTIAL_AES_256_KEY: ${DD_CREDENTIAL_AES_256_KEY:?set DD_CREDENTIAL_AES_256_KEY in .env}
+  DD_DATABASE_READINESS_TIMEOUT: "30"
+
+x-dd-django: &dd-django
+  image: defectdojo/defectdojo-django:${DEFECTDOJO_VERSION:-latest}
+  depends_on:
+    initializer:
+      condition: service_completed_successfully
+    postgres:
+      condition: service_healthy
+    valkey:
+      condition: service_started
+  volumes:
+    - ./extra_settings:/app/docker/extra_settings
+  restart: unless-stopped
+
+x-importer: &importer
+  image: curlimages/curl:8.11.1
+  profiles: [scan]
+  volumes:
+    - ./reports:/reports:ro
+    - ./import.sh:/import.sh:ro
+  entrypoint: ["/bin/sh", "/import.sh"]
+  environment: &importer-env
+    DD_URL: http://nginx:8080
+    DD_ADMIN_USER: ${DD_ADMIN_USER:-admin}
+    DD_ADMIN_PASSWORD: ${DD_ADMIN_PASSWORD:?set DD_ADMIN_PASSWORD in .env}
+    DD_PRODUCT_NAME: ${DD_PRODUCT_NAME:?set DD_PRODUCT_NAME in .env}
+    DD_PRODUCT_TYPE_NAME: ${DD_PRODUCT_TYPE_NAME:-Research and Development}
+    DD_MINIMUM_SEVERITY: ${DD_MINIMUM_SEVERITY:-Info}
+
+services:
+  # ---------------------------------------------------------------- DefectDojo
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${DD_DATABASE_NAME:-defectdojo}
+      POSTGRES_USER: ${DD_DATABASE_USER:-defectdojo}
+      POSTGRES_PASSWORD: ${DD_DATABASE_PASSWORD:-defectdojo}
+    volumes:
+      - defectdojo_postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DD_DATABASE_USER:-defectdojo} -d ${DD_DATABASE_NAME:-defectdojo}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  valkey:
+    image: valkey/valkey:9-alpine
+    volumes:
+      - defectdojo_redis:/data
+    restart: unless-stopped
+
+  # One-shot: runs migrations, seeds data, creates the admin user with DD_ADMIN_PASSWORD.
+  initializer:
+    image: defectdojo/defectdojo-django:${DEFECTDOJO_VERSION:-latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "--", "/entrypoint-initializer.sh"]
+    environment:
+      <<: *dd-env
+      DD_INITIALIZE: "true"
+      DD_ADMIN_USER: ${DD_ADMIN_USER:-admin}
+      DD_ADMIN_MAIL: ${DD_ADMIN_MAIL:-admin@defectdojo.local}
+      DD_ADMIN_PASSWORD: ${DD_ADMIN_PASSWORD:?set DD_ADMIN_PASSWORD in .env}
+      DD_ADMIN_FIRST_NAME: Admin
+      DD_ADMIN_LAST_NAME: User
+    volumes:
+      - ./extra_settings:/app/docker/extra_settings
+
+  uwsgi:
+    <<: *dd-django
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-uwsgi.sh"]
+    environment:
+      <<: *dd-env
+      DD_DEBUG: "False"
+      DD_ALLOWED_HOSTS: ${DD_ALLOWED_HOSTS:-*}
+    volumes:
+      - ./extra_settings:/app/docker/extra_settings
+      - defectdojo_media:/app/media
+
+  celeryworker:
+    <<: *dd-django
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-celery-worker.sh"]
+    environment: *dd-env
+    volumes:
+      - ./extra_settings:/app/docker/extra_settings
+      - defectdojo_media:/app/media
+
+  celerybeat:
+    <<: *dd-django
+    entrypoint: ["/wait-for-it.sh", "postgres:5432", "-t", "30", "--", "/entrypoint-celery-beat.sh"]
+    environment: *dd-env
+
+  nginx:
+    image: defectdojo/defectdojo-nginx:${DEFECTDOJO_VERSION:-latest}
+    depends_on:
+      uwsgi:
+        condition: service_started
+    environment:
+      NGINX_METRICS_ENABLED: "false"
+      DD_UWSGI_HOST: uwsgi
+      DD_UWSGI_PORT: "3031"
+    volumes:
+      - defectdojo_media:/usr/share/nginx/html/media
+    ports:
+      - "${DD_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://127.0.0.1:8080/login || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------ Scanners
+  # SAST: Semgrep over SCAN_PATH -> reports/semgrep.json
+  semgrep:
+    image: semgrep/semgrep:${SEMGREP_VERSION:-latest}
+    profiles: [scan]
+    working_dir: /src
+    volumes:
+      - ${SCAN_PATH:?set SCAN_PATH in .env}:/src:ro
+      - ./reports:/reports
+    environment:
+      SEMGREP_SEND_METRICS: "off"
+    command: >
+      semgrep scan --config ${SEMGREP_CONFIG:-p/default}
+      --metrics=off --json --output /reports/semgrep.json .
+
+  # DAST baseline: passive spider + passive rules, safe to point at anything you own.
+  # Exit 1/2 mean "warnings/failures found" and are treated as success so the import still runs.
+  zap:
+    image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
+    profiles: [scan]
+    volumes:
+      - ./reports:/zap/wrk:rw
+    command: >
+      sh -c 'zap-baseline.py -t "${ZAP_TARGET:?set ZAP_TARGET in .env}" -x zap-baseline.xml -I ${ZAP_EXTRA_ARGS:-};
+             rc=$$?; [ "$$rc" -le 2 ] || exit "$$rc"'
+
+  # DAST full: spider + AJAX spider + ACTIVE attack scan. Only against targets you are authorised to attack.
+  zap-full:
+    image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
+    profiles: [scan]
+    volumes:
+      - ./reports:/zap/wrk:rw
+    command: >
+      sh -c 'zap-full-scan.py -t "${ZAP_TARGET:?set ZAP_TARGET in .env}" -x zap-full.xml -I ${ZAP_EXTRA_ARGS:-};
+             rc=$$?; [ "$$rc" -le 2 ] || exit "$$rc"'
+
+  # ------------------------------------------------------- Importers (scan -> DefectDojo)
+  import-semgrep:
+    <<: *importer
+    depends_on:
+      semgrep: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: Semgrep JSON Report
+      REPORT_FILE: /reports/semgrep.json
+      ENGAGEMENT_NAME: Semgrep SAST
+
+  import-zap:
+    <<: *importer
+    depends_on:
+      zap: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: ZAP Scan
+      REPORT_FILE: /reports/zap-baseline.xml
+      ENGAGEMENT_NAME: ZAP Baseline DAST
+
+  import-zap-full:
+    <<: *importer
+    depends_on:
+      zap-full: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: ZAP Scan
+      REPORT_FILE: /reports/zap-full.xml
+      ENGAGEMENT_NAME: ZAP Full DAST
+
+volumes:
+  defectdojo_postgres: {}
+  defectdojo_media: {}
+  defectdojo_redis: {}
