@@ -49,6 +49,7 @@ report. Reports also land in `./reports/` for local inspection.
 | Command | What it does | Engagement in DefectDojo |
 |---|---|---|
 | `docker compose --profile scan run --rm import-semgrep` | Semgrep over `SCAN_PATH` with `SEMGREP_CONFIG` rules | `Semgrep SAST` |
+| `docker compose --profile scan run --rm import-trivy` | Trivy filesystem scan over `SCAN_PATH`: dependency CVEs + IaC misconfig + secrets | `Trivy SCA` |
 | `docker compose --profile scan run --rm import-zap` | ZAP **baseline**: spider + passive rules. Safe. | `ZAP Baseline DAST` |
 | `docker compose --profile scan run --rm import-zap-full` | ZAP **full**: spider + AJAX spider + **active attack scan**. Slow, noisy, only against targets you own/are authorised to test. | `ZAP Full DAST` |
 

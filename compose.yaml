@@ -29,6 +29,13 @@ x-dd-django: &dd-django
     - ./extra_settings:/app/docker/extra_settings
   restart: unless-stopped
 
+# ZAP's packaged scripts read these and add the header to every request to the given
+# site — how we drive scans behind bearer-token / SSO auth. Empty VALUE = unauthenticated.
+x-zap-auth: &zap-auth
+  ZAP_AUTH_HEADER: ${ZAP_AUTH_HEADER:-Authorization}
+  ZAP_AUTH_HEADER_VALUE: ${ZAP_AUTH_HEADER_VALUE:-}
+  ZAP_AUTH_HEADER_SITE: ${ZAP_AUTH_HEADER_SITE:-}
+
 x-importer: &importer
   image: curlimages/curl:8.11.1
   profiles: [scan]
@@ -145,21 +152,50 @@ services:
       semgrep scan --config ${SEMGREP_CONFIG:-p/default}
       --metrics=off --json --output /reports/semgrep.json .
 
+  # SCA + IaC + secrets: Trivy filesystem scan over SCAN_PATH -> reports/trivy.json
+  # Covers dependency CVEs (NuGet/npm/…), IaC misconfig, and hardcoded secrets in one pass.
+  trivy:
+    image: aquasec/trivy:${TRIVY_VERSION:-latest}
+    profiles: [scan]
+    volumes:
+      - ${SCAN_PATH:?set SCAN_PATH in .env}:/src:ro
+      - ./reports:/reports
+      - trivy_cache:/root/.cache/trivy
+    command: >
+      fs --scanners ${TRIVY_SCANNERS:-vuln,misconfig,secret}
+      --format json --output /reports/trivy.json /src
+
   # DAST baseline: passive spider + passive rules, safe to point at anything you own.
   # Exit 1/2 mean "warnings/failures found" and are treated as success so the import still runs.
   zap:
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
+    environment: *zap-auth
     volumes:
       - ./reports:/zap/wrk:rw
     command: >
       sh -c 'zap-baseline.py -t "${ZAP_TARGET:?set ZAP_TARGET in .env}" -x zap-baseline.xml -I ${ZAP_EXTRA_ARGS:-};
              rc=$$?; [ "$$rc" -le 2 ] || exit "$$rc"'
 
+  # DAST API (OpenAPI/SOAP/GraphQL): imports ZAP_API_DEFINITION and passively scans every
+  # operation. -S = safe mode (no active attacks) but import still sends one request per
+  # operation, including POST/PUT/DELETE — only run against data you can afford to touch.
+  zap-api:
+    image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
+    profiles: [scan]
+    environment: *zap-auth
+    volumes:
+      - ./reports:/zap/wrk:rw
+    command: >
+      sh -c 'zap-api-scan.py -t "${ZAP_API_DEFINITION:?set ZAP_API_DEFINITION in .env}"
+             -f ${ZAP_API_FORMAT:-openapi} -S -x zap-api.xml -I ${ZAP_EXTRA_ARGS:-};
+             rc=$$?; [ "$$rc" -le 2 ] || exit "$$rc"'
+
   # DAST full: spider + AJAX spider + ACTIVE attack scan. Only against targets you are authorised to attack.
   zap-full:
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
+    environment: *zap-auth
     volumes:
       - ./reports:/zap/wrk:rw
     command: >
@@ -178,6 +214,17 @@ services:
       REPORT_FILE: /reports/semgrep.json
       ENGAGEMENT_NAME: Semgrep SAST
 
+  import-trivy:
+    <<: *importer
+    depends_on:
+      trivy: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: Trivy Scan
+      REPORT_FILE: /reports/trivy.json
+      ENGAGEMENT_NAME: Trivy SCA
+
   import-zap:
     <<: *importer
     depends_on:
@@ -188,6 +235,17 @@ services:
       SCAN_TYPE: ZAP Scan
       REPORT_FILE: /reports/zap-baseline.xml
       ENGAGEMENT_NAME: ZAP Baseline DAST
+
+  import-zap-api:
+    <<: *importer
+    depends_on:
+      zap-api: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: ZAP Scan
+      REPORT_FILE: /reports/zap-api.xml
+      ENGAGEMENT_NAME: ZAP API DAST
 
   import-zap-full:
     <<: *importer
@@ -204,3 +262,4 @@ volumes:
   defectdojo_postgres: {}
   defectdojo_media: {}
   defectdojo_redis: {}
+  trivy_cache: {}
