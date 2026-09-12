@@ -165,6 +165,23 @@ services:
       fs --scanners ${TRIVY_SCANNERS:-vuln,misconfig,secret}
       --format json --output /reports/trivy.json /src
 
+  # SonarQube/SonarCloud: pull issues + hotspots from the web API -> reports/sonarqube.json
+  # (Generic Findings Import). Reads the SONAR_BRANCH main branch; set SONAR_PR to test a PR.
+  sonarqube:
+    image: python:3.12-alpine
+    profiles: [scan]
+    volumes:
+      - ./sonar-export.py:/sonar-export.py:ro
+      - ./reports:/reports
+    environment:
+      SONAR_URL: ${SONAR_URL:-https://sonarcloud.io}
+      SONAR_TOKEN: ${SONAR_TOKEN:?set SONAR_TOKEN in .env}
+      SONAR_PROJECT_KEY: ${SONAR_PROJECT_KEY:?set SONAR_PROJECT_KEY in .env}
+      SONAR_ORG: ${SONAR_ORG:-}
+      SONAR_BRANCH: ${SONAR_BRANCH:-develop}
+      SONAR_PR: ${SONAR_PR:-}
+    command: ["python3", "/sonar-export.py"]
+
   # DAST baseline: passive spider + passive rules, safe to point at anything you own.
   # Exit 1/2 mean "warnings/failures found" and are treated as success so the import still runs.
   zap:
@@ -224,6 +241,17 @@ services:
       SCAN_TYPE: Trivy Scan
       REPORT_FILE: /reports/trivy.json
       ENGAGEMENT_NAME: Trivy SCA
+
+  import-sonarqube:
+    <<: *importer
+    depends_on:
+      sonarqube: { condition: service_completed_successfully }
+      nginx: { condition: service_healthy }
+    environment:
+      <<: *importer-env
+      SCAN_TYPE: Generic Findings Import
+      REPORT_FILE: /reports/sonarqube.json
+      ENGAGEMENT_NAME: SonarQube
 
   import-zap:
     <<: *importer
