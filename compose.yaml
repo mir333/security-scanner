@@ -149,6 +149,7 @@ services:
       - ./reports:/reports
     environment:
       SEMGREP_SEND_METRICS: "off"
+      HOME: /tmp   # writable HOME so Semgrep can create ~/.semgrep under a non-root uid
     command: >
       semgrep scan --config ${SEMGREP_CONFIG:-p/default}
       --metrics=off --json --output /reports/semgrep.json .
@@ -162,7 +163,11 @@ services:
     volumes:
       - ${SCAN_PATH:?set SCAN_PATH in .env}:/src:ro
       - ./reports:/reports
-      - trivy_cache:/root/.cache/trivy
+    environment:
+      HOME: /tmp   # writable HOME under a non-root uid
+      # Persist the vuln DB under the (world-writable) reports mount instead of the
+      # root-owned /root/.cache/trivy, which a non-root uid can't write.
+      TRIVY_CACHE_DIR: /reports/.trivycache
     command: >
       fs --scanners ${TRIVY_SCANNERS:-vuln,misconfig,secret}
       --format json --output /reports/trivy.json /src
@@ -296,4 +301,3 @@ volumes:
   defectdojo_postgres: {}
   defectdojo_media: {}
   defectdojo_redis: {}
-  trivy_cache: {}

@@ -163,6 +163,12 @@ scanner/exporter services to your UID/GID in `compose.yaml`:
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
 ```
 
+Forcing a non-root uid removes each tool's writable HOME, so these services also
+set a writable HOME (and Trivy a writable cache dir) in `compose.yaml` — e.g.
+`HOME=/tmp` for Semgrep, and `HOME=/tmp` + `TRIVY_CACHE_DIR=/reports/.trivycache`
+for Trivy (the default `/root/.cache/trivy` isn't writable by a non-root uid).
+Without these you get `PermissionError: /.semgrep` or a Trivy cache write error.
+
 and run with `HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`.
 
 > **Do not add `user:` to the `zap`, `zap-full` or `zap-api` services.** ZAP's
