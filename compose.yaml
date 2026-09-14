@@ -170,6 +170,7 @@ services:
       TRIVY_CACHE_DIR: /reports/.trivycache
     command: >
       fs --scanners ${TRIVY_SCANNERS:-vuln,misconfig,secret}
+      --skip-dirs "${TRIVY_SKIP_DIRS:-**/bin,**/obj,**/node_modules,**/.git,**/.claude}"
       --format json --output /reports/trivy.json /src
 
   # SonarQube/SonarCloud: pull issues + hotspots from the web API -> reports/sonarqube.json
