@@ -41,6 +41,48 @@ fails fast instead of starting a half-configured stack. First boot takes ~1–2 
 (migrations + seed data). Log in at http://localhost:8080 with `DD_ADMIN_USER` /
 `DD_ADMIN_PASSWORD`.
 
+## HTTPS with Let's Encrypt
+
+DefectDojo's own nginx serves HTTPS directly. The overlay
+[`compose.tls.yaml`](compose.tls.yaml) adds a `certbot` service that gets the
+certificate and renews it. No extra reverse proxy is involved.
+
+Requirements: a public DNS name pointing at this host, with ports **80** and
+**443** reachable from the internet (Let's Encrypt's HTTP-01 challenge).
+
+```bash
+# .env
+COMPOSE_FILE=compose.yaml:compose.tls.yaml   # compose reads this, so every command below uses it
+DD_DOMAIN=defectdojo.example.com
+LETSENCRYPT_EMAIL=you@example.com            # optional
+DD_ALLOWED_HOSTS=defectdojo.example.com,127.0.0.1
+
+docker compose up -d
+```
+
+What changes:
+
+| | |
+|---|---|
+| `:80` | answers only `/.well-known/acme-challenge/`; everything else 301 → `https://` |
+| `:443` | DefectDojo over TLS 1.2/1.3 with HSTS; `:8080` is no longer published |
+| certbot | on first boot nginx serves a self-signed placeholder; the real certificate replaces it within about a minute of issuance. Renewal is checked every 12 h, and nginx reloads by itself when the certificate changes |
+| DefectDojo | `DD_SITE_URL`, `DD_CSRF_TRUSTED_ORIGINS` and secure session/CSRF cookies are set for `https://DD_DOMAIN` |
+| importers | upload to `https://DD_DOMAIN:8443`. nginx carries `DD_DOMAIN` as a network alias, so traffic stays inside the stack and the certificate is still verified |
+
+Follow issuance with `docker compose logs -f certbot nginx`. For a first attempt, set
+`LETSENCRYPT_STAGING=true` so failed attempts don't use up the production rate limit (staging certs are not
+browser-trusted, and the importers will reject them). To switch to production, set it back to `false` and
+discard the staging certificate:
+
+```bash
+docker compose rm -sf certbot nginx && docker volume rm devsecops-stack_letsencrypt
+docker compose up -d
+```
+
+Under **rootless Docker**, ports below 1024 are privileged. See
+[RUNNING-AS-USER.md](RUNNING-AS-USER.md#https-on-ports-80443).
+
 ## Running scans
 
 Each `import-*` service runs its scanner first (via `depends_on`), then uploads the

@@ -185,7 +185,7 @@ finish() {
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 ENV_FILE=".env"
-TOTAL_STAGES=7
+TOTAL_STAGES=8
 
 # ── helpers local to this wizard ──────────────────────────────────────────
 _rand() { openssl rand -base64 $(( $1 * 2 )) | tr -d '\n/+=' | cut -c1-"$1"; }   # _rand LEN: exactly LEN [A-Za-z0-9]
@@ -194,7 +194,11 @@ _project() {
   if [[ -n "${COMPOSE_PROJECT_NAME:-}" ]]; then printf '%s' "$COMPOSE_PROJECT_NAME"; return; fi
   basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_-]//g' -e 's/^[^a-z0-9]*//'
 }
-_dd_url() { printf 'http://localhost:%s' "$(_existing DD_PORT || echo 8080)"; }
+_tls_on() { [[ "$(_existing COMPOSE_FILE || true)" == *compose.tls.yaml* && -n "$(_existing DD_DOMAIN || true)" ]]; }
+_dd_url() {
+  if _tls_on; then printf 'https://%s' "$(_existing DD_DOMAIN)"
+  else printf 'http://localhost:%s' "$(_existing DD_PORT || echo 8080)"; fi
+}
 _run_scan() {                       # _run_scan <import-service>
   printf '\n  %s$ docker compose --profile scan run --rm %s%s\n\n' "$DIM" "$1" "$RESET"
   local rc
@@ -294,6 +298,46 @@ done
 pause
 
 # ── 3 ─────────────────────────────────────────────────────────────────────
+stage "HTTPS (Let's Encrypt, optional)"
+say "nginx can serve DefectDojo on https:// with a free Let's Encrypt certificate."
+say "Needs a public DNS name pointing at this host, with ports 80 and 443 open to the"
+say "internet. Skip for local use (http://localhost:$(_existing DD_PORT || echo 8080))."
+printf '\n'
+if _tls_on; then note "HTTPS is enabled for $(_existing DD_DOMAIN)."; fi
+if confirm "Serve DefectDojo over HTTPS with Let's Encrypt?"; then
+  ask DD_DOMAIN "Public DNS name (e.g. defectdojo.example.com):"
+  while [[ ! "$DD_DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; do
+    ask DD_DOMAIN "Enter a fully qualified domain name:"
+  done
+  write_env DD_DOMAIN "$DD_DOMAIN"
+  ask LETSENCRYPT_EMAIL "Contact email for Let's Encrypt (optional):"
+  write_env LETSENCRYPT_EMAIL "${LETSENCRYPT_EMAIL:-}"
+  write_env COMPOSE_FILE "compose.yaml:compose.tls.yaml"
+  write_env DD_ALLOWED_HOSTS "$DD_DOMAIN,127.0.0.1"
+
+  resolved=$(getent ahostsv4 "$DD_DOMAIN" 2>/dev/null | awk 'NR==1{print $1}' || true)
+  if [[ -z "$resolved" ]]; then
+    warn "$DD_DOMAIN does not resolve yet; certbot keeps retrying every 30 min until it does."
+  else
+    note "$DD_DOMAIN resolves to $resolved; that address must reach this host on ports 80/443."
+  fi
+  if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless \
+     && (( $(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024) > 80 )); then
+    warn "Rootless Docker can't bind ports 80/443 yet. Allow it with:"
+    note "    echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-rootless-ports.conf"
+    note "    sudo sysctl --system && systemctl --user restart docker"
+    SKIPPED+=("allow rootless Docker to bind ports 80/443 (see RUNNING-AS-USER.md)")
+  fi
+else
+  if _tls_on; then
+    note "keeping HTTPS as configured. To turn it off, remove COMPOSE_FILE from $ENV_FILE."
+  else
+    note "skipped. DefectDojo stays on plain HTTP."
+  fi
+fi
+pause
+
+# ── 4 ─────────────────────────────────────────────────────────────────────
 stage "SAST target (Semgrep)"
 say "Semgrep scans a source tree on this machine and files findings under a"
 say "DefectDojo *product*. Use one product per application."
@@ -321,7 +365,7 @@ ask SEMGREP_CONFIG "Semgrep config:"
 write_env SEMGREP_CONFIG "${SEMGREP_CONFIG:-p/default}"
 pause
 
-# ── 4 ─────────────────────────────────────────────────────────────────────
+# ── 5 ─────────────────────────────────────────────────────────────────────
 stage "DAST target (OWASP ZAP)"
 say "ZAP needs a *running* web app to crawl. The URL is resolved from inside the"
 say "ZAP container, so 'localhost' will NOT work. Use one of:"
@@ -346,7 +390,7 @@ ask ZAP_EXTRA_ARGS "Extra ZAP args:"
 write_env ZAP_EXTRA_ARGS "${ZAP_EXTRA_ARGS:-}"
 pause
 
-# ── 5 ─────────────────────────────────────────────────────────────────────
+# ── 6 ─────────────────────────────────────────────────────────────────────
 stage "Start DefectDojo"
 say "Runs 'docker compose up -d'. First boot pulls ~2 GB of images and runs"
 say "database migrations; allow 1–3 minutes."
@@ -361,6 +405,10 @@ if confirm "Start (or update) the DefectDojo stack now?"; then
   printf '\n'
   if [[ "$(docker compose ps nginx --format '{{.Health}}' 2>/dev/null)" == "healthy" ]]; then
     printf '  %s✓ DefectDojo is up at %s%s\n' "$GREEN" "$(_dd_url)" "$RESET"
+    if _tls_on; then
+      note "Until Let's Encrypt issues the certificate (~1 min), the browser warns about a"
+      note "self-signed placeholder. Watch progress with: docker compose logs -f certbot"
+    fi
     step "Log in with user '$DD_ADMIN_USER' and the admin password."
     open_url "$(_dd_url)/login"
   else
@@ -373,7 +421,7 @@ else
 fi
 pause
 
-# ── 6 ─────────────────────────────────────────────────────────────────────
+# ── 7 ─────────────────────────────────────────────────────────────────────
 stage "Run scans"
 say "Each scan runs its scanner, then pushes the report into DefectDojo"
 say "(product '$DD_PRODUCT_NAME'). Reports are also saved to ./reports/."
@@ -413,7 +461,7 @@ else
 fi
 pause
 
-# ── 7 ─────────────────────────────────────────────────────────────────────
+# ── 8 ─────────────────────────────────────────────────────────────────────
 stage "Summary"
 finish
 say "Dashboard:   $(_dd_url)   (user: $DD_ADMIN_USER)"

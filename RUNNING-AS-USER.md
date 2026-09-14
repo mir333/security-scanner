@@ -16,6 +16,7 @@ Why rootless Docker:
   — the root-owned-`semgrep.json` annoyance goes away.
 
 Port `8080` is unprivileged, so DefectDojo works under rootless with no extra setup.
+HTTPS on ports 80/443 needs one sysctl, covered [below](#https-on-ports-80443).
 
 ---
 
@@ -103,6 +104,24 @@ sudo -iu devsecops bash -lc '
 ```
 
 Reports now land in `reports/` owned by `devsecops`, no `sudo` needed to clean them.
+
+## HTTPS on ports 80/443
+
+The Let's Encrypt overlay (see README) publishes host ports 80 and 443. A rootless
+daemon may not bind ports below 1024 unless the kernel allows it:
+
+```bash
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/99-rootless-ports.conf
+sudo sysctl --system
+sudo -iu devsecops bash -lc 'systemctl --user restart docker'
+```
+
+This lets *every* local user bind 80–1023, so only use it on a host where that is
+acceptable. Otherwise keep the defaults (`DD_HTTP_PORT`/`DD_HTTPS_PORT` = 80/443) and
+forward 80/443 to higher ports with your firewall.
+
+The nginx container runs as uid 1001, so under rootless its uid maps to a subuid that
+is not `devsecops`. `nginx/*` must stay world-readable (a normal checkout's 644 is fine).
 
 ---
 
