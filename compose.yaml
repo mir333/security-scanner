@@ -140,6 +140,7 @@ services:
   # ------------------------------------------------------------------ Scanners
   # SAST: Semgrep over SCAN_PATH -> reports/semgrep.json
   semgrep:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: semgrep/semgrep:${SEMGREP_VERSION:-latest}
     profiles: [scan]
     working_dir: /src
@@ -155,6 +156,7 @@ services:
   # SCA + IaC + secrets: Trivy filesystem scan over SCAN_PATH -> reports/trivy.json
   # Covers dependency CVEs (NuGet/npm/…), IaC misconfig, and hardcoded secrets in one pass.
   trivy:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: aquasec/trivy:${TRIVY_VERSION:-latest}
     profiles: [scan]
     volumes:
@@ -168,6 +170,7 @@ services:
   # SonarQube/SonarCloud: pull issues + hotspots from the web API -> reports/sonarqube.json
   # (Generic Findings Import). Reads the SONAR_BRANCH main branch; set SONAR_PR to test a PR.
   sonarqube:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: python:3.12-alpine
     profiles: [scan]
     volumes:
@@ -185,6 +188,7 @@ services:
   # DAST baseline: passive spider + passive rules, safe to point at anything you own.
   # Exit 1/2 mean "warnings/failures found" and are treated as success so the import still runs.
   zap:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth
@@ -198,6 +202,7 @@ services:
   # operation. -S = safe mode (no active attacks) but import still sends one request per
   # operation, including POST/PUT/DELETE — only run against data you can afford to touch.
   zap-api:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth
@@ -210,6 +215,7 @@ services:
 
   # DAST full: spider + AJAX spider + ACTIVE attack scan. Only against targets you are authorised to attack.
   zap-full:
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth

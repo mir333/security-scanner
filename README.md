@@ -61,6 +61,11 @@ SCAN_PATH=/path/to/other/repo DD_PRODUCT_NAME=other-app \
   docker compose --profile scan run --rm import-semgrep
 ```
 
+Prepend the user if needed
+```bash
+HOST_UID=$(id -u) HOST_GID=$(id -g)
+```
+
 Re-running the same scan re-imports into the same product/engagement:
 DefectDojo dedups existing findings and closes ones that disappeared
 (`close_old_findings=true` in `import.sh`).
