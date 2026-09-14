@@ -163,6 +163,20 @@ scanner/exporter services to your UID/GID in `compose.yaml`:
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
 ```
 
-and run with `HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`. Leave the
-DefectDojo core (postgres/uwsgi/nginx) and ZAP as-is — those images expect to
-start as root and drop privileges themselves.
+and run with `HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose ...`.
+
+> **Do not add `user:` to the `zap`, `zap-full` or `zap-api` services.** ZAP's
+> packaged scripts must run as the image's built-in `zap` user (uid 1000);
+> forcing another uid makes them fail with
+> `PermissionError: /home/zap/zap.yaml`. Leave the DefectDojo core
+> (postgres/uwsgi/nginx) and the ZAP services as-is — those images start as root
+> (or their own user) and drop privileges themselves.
+
+Because ZAP then writes reports as uid 1000 while `semgrep`/`trivy`/`sonarqube`
+write as your uid, make the shared output dir writable by both, and clear any
+stale ZAP report owned by another uid so it can be recreated:
+
+```bash
+chmod 777 reports          # scratch output dir shared across uids (1777 for sticky bit)
+rm -f reports/zap-*.xml     # only if a previous run left one owned by another user
+```

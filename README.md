@@ -61,10 +61,28 @@ SCAN_PATH=/path/to/other/repo DD_PRODUCT_NAME=other-app \
   docker compose --profile scan run --rm import-semgrep
 ```
 
-Prepend the user if needed
+### Running as a non-root user (rootful Docker)
+
+The `semgrep`, `trivy` and `sonarqube` services honour `HOST_UID`/`HOST_GID`, so
+they write reports owned by you instead of root:
+
 ```bash
-HOST_UID=$(id -u) HOST_GID=$(id -g)
+HOST_UID=$(id -u) HOST_GID=$(id -g) \
+  docker compose --profile scan run --rm import-trivy
 ```
+
+The **ZAP** services deliberately have **no `user:` override** — ZAP's packaged
+scripts must run as the image's built-in `zap` user (uid 1000) or they fail with
+`PermissionError: /home/zap/zap.yaml`. Because ZAP writes as uid 1000 while the
+other scanners write as your uid, make the shared output dir writable by both:
+
+```bash
+chmod 777 reports   # scratch output dir shared by uids; or 1777 for the sticky bit
+```
+
+If a ZAP report already exists owned by another user, remove it first so ZAP can
+recreate it: `rm -f reports/zap-*.xml`. (Rootless Docker sidesteps all of this —
+see [RUNNING-AS-USER.md](RUNNING-AS-USER.md) — drop the `HOST_UID`/`chmod` dance.)
 
 Re-running the same scan re-imports into the same product/engagement:
 DefectDojo dedups existing findings and closes ones that disappeared

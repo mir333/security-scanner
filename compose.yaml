@@ -187,8 +187,10 @@ services:
 
   # DAST baseline: passive spider + passive rules, safe to point at anything you own.
   # Exit 1/2 mean "warnings/failures found" and are treated as success so the import still runs.
+  # No `user:` override here: ZAP's packaged scripts must run as the image's built-in
+  # `zap` user (uid 1000) so they can write /home/zap/zap.yaml. Make ./reports writable
+  # by uid 1000 instead (see README) — do NOT pin these services to the host uid.
   zap:
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth
@@ -202,7 +204,6 @@ services:
   # operation. -S = safe mode (no active attacks) but import still sends one request per
   # operation, including POST/PUT/DELETE — only run against data you can afford to touch.
   zap-api:
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth
@@ -215,7 +216,6 @@ services:
 
   # DAST full: spider + AJAX spider + ACTIVE attack scan. Only against targets you are authorised to attack.
   zap-full:
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     image: zaproxy/zap-stable:${ZAP_VERSION:-latest}
     profiles: [scan]
     environment: *zap-auth
