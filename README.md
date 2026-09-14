@@ -88,6 +88,8 @@ the real host instead of `http://nginx:8080` if DefectDojo lives elsewhere.
 * `docker compose run` re-checks the whole dependency chain, so the one-shot
   `initializer` runs again (idempotent, ~20 s) before each scan. Harmless.
 * `reports/semgrep.json` is root-owned (Semgrep image runs as root); `sudo rm` if you need to clean it.
+  Running the stack as a dedicated, non-privileged user with rootless Docker avoids this — see
+  [RUNNING-AS-USER.md](RUNNING-AS-USER.md) (Arch + Ubuntu instructions).
 * Tear down: `docker compose --profile scan down` (add `-v` to wipe the database).
 * Upgrading DefectDojo: bump `DEFECTDOJO_VERSION`, `docker compose pull`,
   `docker compose up -d` — the initializer applies migrations.
