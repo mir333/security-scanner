@@ -30,6 +30,9 @@ SEV = {"BLOCKER": "Critical", "CRITICAL": "High", "MAJOR": "Medium",
        "MINOR": "Low", "INFO": "Info"}
 # Security hotspot review priority -> DefectDojo severity
 HOTSPOT_SEV = {"HIGH": "High", "MEDIUM": "Medium", "LOW": "Low"}
+# Sonar issue type -> title label; also emitted (lower-kebab) as a DefectDojo tag
+TYPE_LABEL = {"VULNERABILITY": "Vulnerability", "BUG": "Bug",
+              "CODE_SMELL": "Code Smell", "SECURITY_HOTSPOT": "Hotspot"}
 
 # SonarQube token authenticates as HTTP basic user with an empty password.
 AUTH = "Basic " + base64.b64encode(f"{TOKEN}:".encode()).decode()
@@ -108,6 +111,11 @@ def issues(**params):
         yield from issues(**sub)
 
 
+def slug(text):
+    # "Code Smell" / "CODE_SMELL" -> "code-smell"
+    return text.lower().replace("_", "-").replace(" ", "-")
+
+
 def strip_component(component):
     # "projectKey:path/to/file.cs" -> "path/to/file.cs"
     return component.split(":", 1)[1] if ":" in component else component
@@ -125,13 +133,23 @@ def main():
         seen.add(i.get("key"))
         rng = i.get("textRange", {})
         rule = i.get("rule", "")
+        kind = i.get("type", "")
+        label = TYPE_LABEL.get(kind, kind.replace("_", " ").title())
+        # MQR-mode impacts, e.g. MAINTAINABILITY:LOW, RELIABILITY:HIGH
+        impacts = i.get("impacts", [])
         findings.append({
-            "title": f"[Sonar] {rule}: {i.get('message', '')}"[:511],
+            "title": f"[Sonar {label}] {rule}: {i.get('message', '')}"[:511],
             "description": (
                 f"{i.get('message', '')}\n\n"
-                f"Rule: {rule}\nType: {i.get('type', '')}\n"
+                f"Rule: {rule}\nType: {kind}\n"
                 f"Effort: {i.get('effort', i.get('debt', 'n/a'))}"),
             "severity": SEV.get(i.get("severity", "INFO"), "Info"),
+            "severity_justification": "Sonar severity: {}{}".format(
+                i.get("severity", ""),
+                "".join(f"\n{m['softwareQuality'].title()} impact: {m['severity']}"
+                        for m in impacts)),
+            "tags": ["sonar", slug(label)] + sorted(
+                {slug(m["softwareQuality"]) for m in impacts}),
             "file_path": strip_component(i.get("component", "")),
             "line": i.get("line") or rng.get("startLine"),
             "vuln_id_from_tool": rule,
@@ -153,6 +171,7 @@ def main():
                 f"Security category: {h.get('securityCategory', '')}\n"
                 f"Vulnerability probability: {h.get('vulnerabilityProbability', '')}"),
             "severity": HOTSPOT_SEV.get(h.get("vulnerabilityProbability", "LOW"), "Info"),
+            "tags": ["sonar", "security-hotspot", "security"],
             "file_path": strip_component(h.get("component", "")),
             "line": h.get("line") or rng.get("startLine"),
             "unique_id_from_tool": h.get("key"),
