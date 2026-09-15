@@ -49,16 +49,63 @@ def api(path, **params):
         return json.load(r)
 
 
+# Sonar search endpoints refuse to page past 10,000 results, and facets list at
+# most 100 values.
+SEARCH_LIMIT = 10000
+FACET_LIMIT = 100
+
+
+def total_of(data):
+    return data.get("paging", {}).get("total", data.get("total", 0))
+
+
 def paged(path, list_key, **params):
     page, size = 1, 500
     while True:
         data = api(path, p=page, ps=size, **params)
         items = data.get(list_key, [])
         yield from items
-        got = data.get("paging", {}).get("total", data.get("total", 0))
-        if page * size >= got or not items:
+        if page * size >= min(total_of(data), SEARCH_LIMIT) or not items:
             break
         page += 1
+
+
+def facet_values(facet, **params):
+    data = api("issues/search", ps=1, facets=facet, **params)
+    values = next((f["values"] for f in data.get("facets", [])
+                   if f["property"] == facet), [])
+    return [v["val"] for v in values if v["count"]]
+
+
+# Single-valued issue attributes, coarsest first. Splitting on one of them
+# yields disjoint slices that together cover the parent query.
+SPLIT_FACETS = ("severities", "types", "cleanCodeAttributeCategories", "scopes", "rules")
+
+
+def split(params):
+    """Partition an oversized issue query into disjoint narrower ones."""
+    for facet in SPLIT_FACETS:
+        if facet in params:
+            continue
+        values = facet_values(facet, **params)
+        if len(values) < FACET_LIMIT:  # a truncated facet would drop issues
+            return [{**params, facet: v} for v in values]
+    return []
+
+
+def issues(**params):
+    total = total_of(api("issues/search", p=1, ps=1, **params))
+    if not total:
+        return
+    subs = split(params) if total > SEARCH_LIMIT else []
+    if not subs:
+        if total > SEARCH_LIMIT:
+            print(f"sonar-export: WARNING {total} issues in slice {params}, "
+                  f"only the first {SEARCH_LIMIT} are exported", file=sys.stderr)
+        yield from paged("issues/search", "issues", **params)
+        return
+    for sub in subs:
+        yield from issues(**sub)
 
 
 def strip_component(component):
@@ -69,8 +116,13 @@ def strip_component(component):
 def main():
     findings = []
 
-    for i in paged("issues/search", "issues",
-                   componentKeys=PROJECT, resolved="false"):
+    expected = total_of(api("issues/search", p=1, ps=1,
+                            componentKeys=PROJECT, resolved="false"))
+    seen = set()
+    for i in issues(componentKeys=PROJECT, resolved="false"):
+        if i.get("key") in seen:
+            continue
+        seen.add(i.get("key"))
         rng = i.get("textRange", {})
         rule = i.get("rule", "")
         findings.append({
@@ -88,6 +140,9 @@ def main():
             "static_finding": True,
             "dynamic_finding": False,
         })
+    if len(seen) != expected:
+        print(f"sonar-export: WARNING exported {len(seen)} of {expected} open issues",
+              file=sys.stderr)
 
     for h in paged("hotspots/search", "hotspots", projectKey=PROJECT):
         rng = h.get("textRange", {})
